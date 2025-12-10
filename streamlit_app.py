@@ -364,7 +364,7 @@ with tab1:
         
         st.divider()
         st.subheader("Data Preview")
-        st.dataframe(df.head(20), use_container_width=True)
+        st.dataframe(df.head(20), width='stretch')
         
         # Store mapped columns
         st.session_state['data'] = df
@@ -380,53 +380,59 @@ with tab2:
     if 'data' not in st.session_state:
         st.warning("⚠️ Please load data in the Data Input tab first.")
     else:
-        df = st.session_state['data']
-        protein_col = st.session_state['protein_col']
-        species_col = st.session_state['species_col']
-        fc_col = st.session_state['fc_col']
-        
-        with st.spinner("🔬 Classifying proteins..."):
-            classifications = {}
+        # Check if we need to run classification
+        if 'results_df' not in st.session_state or st.session_state.get('last_params') != (equiv_tolerance_pct, direction_prob_cutoff, direction_threshold):
+            df = st.session_state['data']
+            protein_col = st.session_state['protein_col']
+            species_col = st.session_state['species_col']
+            fc_col = st.session_state['fc_col']
             
-            for idx, row in df.iterrows():
-                try:
-                    # Extract values using mapped columns
-                    protein_id = str(row[protein_col])
-                    species = str(row[species_col]) if species_col else "Unknown"
-                    observed_fc = float(row[fc_col])
+            with st.spinner("🔬 Classifying proteins..."):
+                classifications = {}
                 
-                except (KeyError, ValueError, TypeError):
-                    continue  # Skip malformed rows silently
-                
-                expected_fc = expected_fc_map.get(species, 0)
-                
-                # Generate posterior samples
-                replicate_cols = [c for c in df.columns if 'replicate' in c.lower() or 'rep' in c.lower()]
-                
-                if replicate_cols:
+                for idx, row in df.iterrows():
                     try:
-                        reps = np.array([float(row[c]) for c in replicate_cols if pd.notna(row[c])], dtype=float)
-                        if len(reps) > 0:
-                            posterior = np.random.normal(np.mean(reps), max(np.std(reps), 0.01) + 0.01, 1000)
-                        else:
+                        # Extract values using mapped columns
+                        protein_id = str(row[protein_col])
+                        species = str(row[species_col]) if species_col else "Unknown"
+                        observed_fc = float(row[fc_col])
+                    
+                    except (KeyError, ValueError, TypeError):
+                        continue  # Skip malformed rows silently
+                    
+                    expected_fc = expected_fc_map.get(species, 0)
+                    
+                    # Generate posterior samples
+                    replicate_cols = [c for c in df.columns if 'replicate' in c.lower() or 'rep' in c.lower()]
+                    
+                    if replicate_cols:
+                        try:
+                            reps = np.array([float(row[c]) for c in replicate_cols if pd.notna(row[c])], dtype=float)
+                            if len(reps) > 0:
+                                posterior = np.random.normal(np.mean(reps), max(np.std(reps), 0.01) + 0.01, 1000)
+                            else:
+                                posterior = np.random.normal(observed_fc, 0.2, 1000)
+                        except:
                             posterior = np.random.normal(observed_fc, 0.2, 1000)
-                    except:
+                    else:
                         posterior = np.random.normal(observed_fc, 0.2, 1000)
-                else:
-                    posterior = np.random.normal(observed_fc, 0.2, 1000)
+                    
+                    tolerance = abs(expected_fc) * equiv_tolerance_pct if expected_fc != 0 else 0.5
+                    
+                    result = classify_protein(posterior, expected_fc, tolerance, 
+                                              direction_threshold, direction_prob_cutoff)
+                    result['species'] = species
+                    result['protein_id'] = protein_id
+                    classifications[protein_id] = result
                 
-                tolerance = abs(expected_fc) * equiv_tolerance_pct if expected_fc != 0 else 0.5
-                
-                result = classify_protein(posterior, expected_fc, tolerance, 
-                                          direction_threshold, direction_prob_cutoff)
-                result['species'] = species
-                result['protein_id'] = protein_id
-                classifications[protein_id] = result
+                results_df = pd.DataFrame(classifications).T.reset_index(drop=True)
             
-            results_df = pd.DataFrame(classifications).T.reset_index(drop=True)
+            st.session_state['classifications'] = classifications
+            st.session_state['results_df'] = results_df
+            st.session_state['last_params'] = (equiv_tolerance_pct, direction_prob_cutoff, direction_threshold)
         
-        st.session_state['classifications'] = classifications
-        st.session_state['results_df'] = results_df
+        # Use cached results
+        results_df = st.session_state['results_df']
         
         # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -451,7 +457,7 @@ with tab2:
                                title="Classification Distribution by Species",
                                color_discrete_sequence=px.colors.qualitative.Set2)
         fig_cat.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_cat, use_container_width=True)
+        st.plotly_chart(fig_cat, width='stretch')
         
         # Detailed results table
         st.subheader("Classification Results")
@@ -466,7 +472,7 @@ with tab2:
             (results_df['species'].isin(filter_species))
         ]
         
-        st.dataframe(filtered_df, use_container_width=True)
+        st.dataframe(filtered_df, width='stretch')
         
         # Download button
         csv = filtered_df.to_csv(index=False)
@@ -482,7 +488,6 @@ with tab3:
     else:
         classifications = st.session_state['classifications']
         results_df = st.session_state['results_df']
-        df = st.session_state['data']
         
         st.subheader("LFQ_bout Metrics")
         
@@ -524,7 +529,7 @@ with tab3:
         
         rmse_df = pd.DataFrame(stratified).T
         rmse_df.index.name = 'Species'
-        st.dataframe(rmse_df.round(4), use_container_width=True)
+        st.dataframe(rmse_df.round(4), width='stretch')
         
         st.divider()
         
@@ -553,10 +558,10 @@ with tab3:
         fig_cpk.add_hline(y=1.0, line_dash="dash", line_color="orange", annotation_text="Minimum (1.0)")
         fig_cpk.update_layout(title="Process Capability Index (Cpk) by Species", showlegend=False,
                               yaxis_title="Cpk", xaxis_title="Species")
-        st.plotly_chart(fig_cpk, use_container_width=True)
+        st.plotly_chart(fig_cpk, width='stretch')
         
         with st.expander("📋 Full Capability Analysis"):
-            st.dataframe(cpk_df.round(4), use_container_width=True)
+            st.dataframe(cpk_df.round(4), width='stretch')
 
 # ============================================================================
 # TAB 4: DISTRIBUTION ANALYSIS
@@ -583,7 +588,7 @@ with tab4:
         fig_scatter.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val], 
                                          mode='lines', name='Perfect agreement',
                                          line=dict(dash='dash', color='gray')))
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width='stretch')
         
         # Distribution by species
         st.subheader("Distribution by Species")
@@ -596,7 +601,7 @@ with tab4:
             fig_dist.add_hline(y=exp_fc, line_dash="dot", 
                               annotation_text=f"{species} expected: {exp_fc}")
         
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, width='stretch')
         
         # K-S Test results
         st.subheader("Distribution Comparison Tests")
@@ -616,7 +621,7 @@ with tab4:
             })
         
         ks_df = pd.DataFrame(ks_results)
-        st.dataframe(ks_df.round(4), use_container_width=True)
+        st.dataframe(ks_df.round(4), width='stretch')
 
 # Footer
 st.divider()
