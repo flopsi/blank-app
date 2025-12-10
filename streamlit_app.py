@@ -380,103 +380,161 @@ with tab2:
     if 'data' not in st.session_state:
         st.warning("⚠️ Please load data in the Data Input tab first.")
     else:
-        # Check if we need to run classification
-        if 'results_df' not in st.session_state or st.session_state.get('last_params') != (equiv_tolerance_pct, direction_prob_cutoff, direction_threshold):
+        # Re-run classification only when params change or no result is cached
+        need_rerun = (
+            'results_df' not in st.session_state
+            or 'last_params' not in st.session_state
+            or st.session_state['last_params'] != (equiv_tolerance_pct, direction_prob_cutoff, direction_threshold)
+        )
+
+        if need_rerun:
             df = st.session_state['data']
             protein_col = st.session_state['protein_col']
             species_col = st.session_state['species_col']
             fc_col = st.session_state['fc_col']
-            
+
             with st.spinner("🔬 Classifying proteins..."):
                 classifications = {}
-                
+
                 for idx, row in df.iterrows():
                     try:
                         # Extract values using mapped columns
                         protein_id = str(row[protein_col])
                         species = str(row[species_col]) if species_col else "Unknown"
                         observed_fc = float(row[fc_col])
-                    
                     except (KeyError, ValueError, TypeError):
-                        continue  # Skip malformed rows silently
-                    
+                        # Skip malformed rows silently
+                        continue
+
                     expected_fc = expected_fc_map.get(species, 0)
-                    
+
                     # Generate posterior samples
-                    replicate_cols = [c for c in df.columns if 'replicate' in c.lower() or 'rep' in c.lower()]
-                    
+                    replicate_cols = [
+                        c for c in df.columns
+                        if 'replicate' in c.lower() or 'rep' in c.lower()
+                    ]
+
                     if replicate_cols:
                         try:
-                            reps = np.array([float(row[c]) for c in replicate_cols if pd.notna(row[c])], dtype=float)
+                            reps = np.array(
+                                [float(row[c]) for c in replicate_cols if pd.notna(row[c])],
+                                dtype=float
+                            )
                             if len(reps) > 0:
-                                posterior = np.random.normal(np.mean(reps), max(np.std(reps), 0.01) + 0.01, 1000)
+                                posterior = np.random.normal(
+                                    np.mean(reps),
+                                    max(np.std(reps), 0.01) + 0.01,
+                                    1000
+                                )
                             else:
                                 posterior = np.random.normal(observed_fc, 0.2, 1000)
-                        except:
+                        except Exception:
                             posterior = np.random.normal(observed_fc, 0.2, 1000)
                     else:
                         posterior = np.random.normal(observed_fc, 0.2, 1000)
-                    
+
                     tolerance = abs(expected_fc) * equiv_tolerance_pct if expected_fc != 0 else 0.5
-                    
-                    result = classify_protein(posterior, expected_fc, tolerance, 
-                                              direction_threshold, direction_prob_cutoff)
+
+                    result = classify_protein(
+                        posterior,
+                        expected_fc,
+                        tolerance,
+                        direction_threshold,
+                        direction_prob_cutoff,
+                    )
                     result['species'] = species
                     result['protein_id'] = protein_id
                     classifications[protein_id] = result
-                
-                results_df = pd.DataFrame(classifications).T.reset_index(drop=True)
-            
+
+                # Build DataFrame from dict-of-dicts with index orientation
+                if len(classifications) == 0:
+                    results_df = pd.DataFrame(columns=['protein_id', 'species', 'category'])
+                else:
+                    results_df = (
+                        pd.DataFrame.from_dict(classifications, orient='index')
+                        .reset_index(drop=True)
+                    )
+
             st.session_state['classifications'] = classifications
             st.session_state['results_df'] = results_df
-            st.session_state['last_params'] = (equiv_tolerance_pct, direction_prob_cutoff, direction_threshold)
-        
+            st.session_state['last_params'] = (
+                equiv_tolerance_pct,
+                direction_prob_cutoff,
+                direction_threshold,
+            )
+
         # Use cached results
         results_df = st.session_state['results_df']
-        
-        # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        category_counts = results_df['category'].value_counts()
-        
-        with col1:
-            val = category_counts.get('CORRECT_DIRECTION_AND_MAGNITUDE', 0)
-            st.metric("✅ Correct Dir & Mag", val, f"{val/len(results_df)*100:.1f}%")
-        with col2:
-            val = category_counts.get('CORRECT_DIRECTION_WRONG_MAGNITUDE', 0)
-            st.metric("⚠️ Correct Dir Only", val, f"{val/len(results_df)*100:.1f}%")
-        with col3:
-            val = category_counts.get('WRONG_DIRECTION', 0)
-            st.metric("❌ Wrong Direction", val, f"{val/len(results_df)*100:.1f}%")
-        with col4:
-            val = category_counts.get('TRUE_FALSE_POSITIVE', 0) + category_counts.get('CORRECT_UNCHANGED', 0)
-            st.metric("🔵 Background", val)
-        
-        # Category distribution plot
-        fig_cat = px.histogram(results_df, x='category', color='species', barmode='group',
-                               title="Classification Distribution by Species",
-                               color_discrete_sequence=px.colors.qualitative.Set2)
-        fig_cat.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_cat, width='stretch')
-        
-        # Detailed results table
-        st.subheader("Classification Results")
-        
-        filter_category = st.multiselect("Filter by category", results_df['category'].unique(), 
-                                          default=results_df['category'].unique())
-        filter_species = st.multiselect("Filter by species", results_df['species'].unique(),
-                                         default=results_df['species'].unique())
-        
-        filtered_df = results_df[
-            (results_df['category'].isin(filter_category)) & 
-            (results_df['species'].isin(filter_species))
-        ]
-        
-        st.dataframe(filtered_df, width='stretch')
-        
-        # Download button
-        csv = filtered_df.to_csv(index=False)
-        st.download_button("📥 Download Classifications", csv, "classifications.csv", "text/csv")
+
+        # If still no valid classifications, bail out gracefully
+        if results_df.empty or 'category' not in results_df.columns:
+            st.warning(
+                "No valid proteins could be classified. "
+                "Check column mapping, numeric fold-change values, and species settings."
+            )
+        else:
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+
+            category_counts = results_df['category'].value_counts()
+
+            with col1:
+                val = category_counts.get('CORRECT_DIRECTION_AND_MAGNITUDE', 0)
+                st.metric("✅ Correct Dir & Mag", val, f"{val/len(results_df)*100:.1f}%")
+            with col2:
+                val = category_counts.get('CORRECT_DIRECTION_WRONG_MAGNITUDE', 0)
+                st.metric("⚠️ Correct Dir Only", val, f"{val/len(results_df)*100:.1f}%")
+            with col3:
+                val = category_counts.get('WRONG_DIRECTION', 0)
+                st.metric("❌ Wrong Direction", val, f"{val/len(results_df)*100:.1f}%")
+            with col4:
+                val = (
+                    category_counts.get('TRUE_FALSE_POSITIVE', 0)
+                    + category_counts.get('CORRECT_UNCHANGED', 0)
+                )
+                st.metric("🔵 Background", val)
+
+            # Category distribution plot
+            fig_cat = px.histogram(
+                results_df,
+                x='category',
+                color='species',
+                barmode='group',
+                title="Classification Distribution by Species",
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_cat.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig_cat, width='stretch')
+
+            # Detailed results table
+            st.subheader("Classification Results")
+
+            filter_category = st.multiselect(
+                "Filter by category",
+                results_df['category'].unique(),
+                default=results_df['category'].unique(),
+            )
+            filter_species = st.multiselect(
+                "Filter by species",
+                results_df['species'].unique(),
+                default=results_df['species'].unique(),
+            )
+
+            filtered_df = results_df[
+                (results_df['category'].isin(filter_category))
+                & (results_df['species'].isin(filter_species))
+            ]
+
+            st.dataframe(filtered_df, width='stretch')
+
+            # Download button
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                "📥 Download Classifications",
+                csv,
+                "classifications.csv",
+                "text/csv",
+            )
 
 # ============================================================================
 # TAB 3: METRICS DASHBOARD
