@@ -16,6 +16,42 @@ from io import StringIO
 st.set_page_config(page_title="Proteomics Benchmark Classifier", layout="wide", page_icon="🧬")
 
 # ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def detect_columns(df):
+    """Auto-detect protein_id, species, and log2_fc columns."""
+    cols_lower = {col.lower(): col for col in df.columns}
+    
+    # Detect protein ID column
+    protein_col = None
+    for key in ['protein_id', 'protein', 'id', 'gene', 'gene_name', 'accession']:
+        if key in cols_lower:
+            protein_col = cols_lower[key]
+            break
+    if not protein_col and len(df.columns) > 0:
+        protein_col = df.columns[0]
+    
+    # Detect species column
+    species_col = None
+    for key in ['species', 'organism', 'org']:
+        if key in cols_lower:
+            species_col = cols_lower[key]
+            break
+    
+    # Detect fold-change column
+    fc_col = None
+    for key in ['log2_fc', 'log2fc', 'logfc', 'fc', 'log2foldchange', 'fold_change']:
+        if key in cols_lower:
+            fc_col = cols_lower[key]
+            break
+    if not fc_col and len(df.columns) > 1:
+        fc_col = df.columns[1]
+    
+    return protein_col, species_col, fc_col
+
+
+# ============================================================================
 # CORE FUNCTIONS
 # ============================================================================
 
@@ -259,72 +295,125 @@ with st.sidebar:
 # Main content
 tab1, tab2, tab3, tab4 = st.tabs(["📤 Data Input", "📊 Classification Results", "📈 Metrics Dashboard", "🔬 Distribution Analysis"])
 
+# ============================================================================
+# TAB 1: DATA INPUT
+# ============================================================================
+
 with tab1:
     st.subheader("Upload Proteomics Data")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("**Required columns:** `protein_id`, `species`, `log2_fc`")
-        st.markdown("**Optional:** `replicate_values` (comma-separated) or individual replicate columns")
-        
+        st.markdown("**Flexible column mapping** - auto-detects protein_id, species, log2_fc")
         uploaded_file = st.file_uploader("Upload CSV/TSV", type=['csv', 'tsv', 'txt'])
     
     with col2:
         use_demo = st.checkbox("Use demo data", value=True)
-        
-        if use_demo:
-            np.random.seed(42)
-            n_proteins = 500
-            
-            species_list = np.random.choice([species_1_name, species_2_name, species_3_name], 
-                                            n_proteins, p=[0.6, 0.25, 0.15])
-            
-            demo_data = []
-            for i, sp in enumerate(species_list):
-                expected = expected_fc_map[sp]
-                # Simulate posterior samples with some noise
-                base_fc = expected + np.random.normal(0, 0.3)
-                reps = base_fc + np.random.normal(0, 0.15, 5)
-                demo_data.append({
-                    'protein_id': f'PROT_{i:04d}',
-                    'species': sp,
-                    'log2_fc': np.mean(reps),
-                    'replicate_values': ','.join([f'{v:.4f}' for v in reps])
-                })
-            
-            df = pd.DataFrame(demo_data)
-            st.success(f"Demo data loaded: {len(df)} proteins")
-
+    
+    # Load data
+    df = None
     if uploaded_file is not None:
         sep = '\t' if uploaded_file.name.endswith('.tsv') else ','
-        df = pd.read_csv(uploaded_file, sep=sep)
-        st.success(f"Uploaded: {len(df)} proteins")
+        try:
+            df = pd.read_csv(uploaded_file, sep=sep)
+            st.success(f"✅ Uploaded: {len(df)} proteins")
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
     
-    if 'df' in dir() and df is not None:
+    if use_demo or df is None:
+        np.random.seed(42)
+        n_proteins = 500
+        species_list = np.random.choice([species_1_name, species_2_name, species_3_name], 
+                                        n_proteins, p=[0.6, 0.25, 0.15])
+        demo_data = []
+        for i, sp in enumerate(species_list):
+            expected = expected_fc_map[sp]
+            base_fc = expected + np.random.normal(0, 0.3)
+            reps = base_fc + np.random.normal(0, 0.15, 5)
+            demo_data.append({
+                'protein_id': f'PROT_{i:04d}',
+                'species': sp,
+                'log2_fc': np.mean(reps),
+                'replicate_values': ','.join([f'{v:.4f}' for v in reps])
+            })
+        df = pd.DataFrame(demo_data)
+        if uploaded_file is None:
+            st.info(f"📊 Demo data loaded: {len(df)} proteins")
+    
+    if df is not None:
+        # Auto-detect columns
+        protein_col, species_col, fc_col = detect_columns(df)
+        
+        st.divider()
+        st.subheader("Column Mapping")
+        
+        col_a, col_b, col_c = st.columns(3)
+        
+        with col_a:
+            protein_col = st.selectbox("Protein ID Column", df.columns.tolist(),
+                index=df.columns.tolist().index(protein_col) if protein_col in df.columns else 0)
+        
+        with col_b:
+            species_col = st.selectbox("Species Column", [None] + df.columns.tolist(),
+                index=(df.columns.tolist().index(species_col) + 1) if species_col and species_col in df.columns else 0)
+        
+        with col_c:
+            fc_col = st.selectbox("Fold-Change Column (log2)", df.columns.tolist(),
+                index=df.columns.tolist().index(fc_col) if fc_col in df.columns else (1 if len(df.columns) > 1 else 0))
+        
+        st.divider()
+        st.subheader("Data Preview")
         st.dataframe(df.head(20), use_container_width=True)
+        
+        # Store mapped columns
         st.session_state['data'] = df
+        st.session_state['protein_col'] = protein_col
+        st.session_state['species_col'] = species_col
+        st.session_state['fc_col'] = fc_col
+
+# ============================================================================
+# TAB 2: CLASSIFICATION RESULTS
+# ============================================================================
 
 with tab2:
     if 'data' not in st.session_state:
-        st.warning("Please upload data or use demo data in the Data Input tab.")
+        st.warning("⚠️ Please load data in the Data Input tab first.")
     else:
         df = st.session_state['data']
+        protein_col = st.session_state['protein_col']
+        species_col = st.session_state['species_col']
+        fc_col = st.session_state['fc_col']
         
-        with st.spinner("Classifying proteins..."):
+        with st.spinner("🔬 Classifying proteins..."):
             classifications = {}
             
-            for _, row in df.iterrows():
-                protein_id = row['protein_id']
-                species = row['species']
+            for idx, row in df.iterrows():
+                try:
+                    # Extract values using mapped columns
+                    protein_id = str(row[protein_col])
+                    species = str(row[species_col]) if species_col else "Unknown"
+                    observed_fc = float(row[fc_col])
+                
+                except (KeyError, ValueError, TypeError):
+                    continue  # Skip malformed rows silently
+                
                 expected_fc = expected_fc_map.get(species, 0)
                 
-                # Generate posterior samples from replicates or single value
-                if 'replicate_values' in row and pd.notna(row['replicate_values']):
-                    reps = np.array([float(x) for x in str(row['replicate_values']).split(',')])
-                    posterior = np.random.normal(np.mean(reps), np.std(reps) + 0.01, 1000)
+                # Generate posterior samples
+                replicate_cols = [c for c in df.columns if 'replicate' in c.lower() or 'rep' in c.lower()]
+                
+                if replicate_cols:
+                    try:
+                        reps = np.array([float(row[c]) for c in replicate_cols if pd.notna(row[c])], dtype=float)
+                        if len(reps) > 0:
+                            posterior = np.random.normal(np.mean(reps), max(np.std(reps), 0.01) + 0.01, 1000)
+                        else:
+                            posterior = np.random.normal(observed_fc, 0.2, 1000)
+                    except:
+                        posterior = np.random.normal(observed_fc, 0.2, 1000)
                 else:
-                    posterior = np.random.normal(row['log2_fc'], 0.2, 1000)
+                    posterior = np.random.normal(observed_fc, 0.2, 1000)
                 
                 tolerance = abs(expected_fc) * equiv_tolerance_pct if expected_fc != 0 else 0.5
                 
@@ -382,6 +471,10 @@ with tab2:
         # Download button
         csv = filtered_df.to_csv(index=False)
         st.download_button("📥 Download Classifications", csv, "classifications.csv", "text/csv")
+
+# ============================================================================
+# TAB 3: METRICS DASHBOARD
+# ============================================================================
 
 with tab3:
     if 'classifications' not in st.session_state:
@@ -464,6 +557,10 @@ with tab3:
         
         with st.expander("📋 Full Capability Analysis"):
             st.dataframe(cpk_df.round(4), use_container_width=True)
+
+# ============================================================================
+# TAB 4: DISTRIBUTION ANALYSIS
+# ============================================================================
 
 with tab4:
     if 'results_df' not in st.session_state:
